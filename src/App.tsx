@@ -8,11 +8,20 @@ import {
   track,
   useEditor,
   Editor,
+  TLDrawShapeSegment,
 } from "@tldraw/tldraw";
 import { Slider, Theme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loro, OpId, toReadableVersion } from "loro-crdt";
+import {
+  Container,
+  Loro,
+  LoroList,
+  LoroMap,
+  MapDiff,
+  OpId,
+  toReadableVersion,
+} from "loro-crdt";
 import { DEFAULT_STORE } from "./default_store";
 
 export default function LoroExample() {
@@ -52,12 +61,11 @@ export default function LoroExample() {
             return;
           }
           Object.values(changes.added).forEach((record) => {
-            docStore.set(record.id, record);
+            addRecord(docStore, record);
           });
           Object.values(changes.updated).forEach(([_, record]) => {
-            docStore.set(record.id, record);
+            updateRecord(doc, docStore, record);
           });
-
           Object.values(changes.removed).forEach((record) => {
             docStore.delete(record.id);
           });
@@ -73,10 +81,6 @@ export default function LoroExample() {
       const bytes = new Uint8Array(e.data.bytes);
       doc.import(bytes);
     };
-    // for (const record of store.allRecords()) {
-    //   docStore.set(record.id, record);
-    // }
-    // doc.commit();
     const subs = doc.subscribe((e) => {
       const version = Object.fromEntries(toReadableVersion(doc.version()));
       let vv = "";
@@ -98,17 +102,25 @@ export default function LoroExample() {
       if (e.fromCheckout || !e.local) {
         const toRemove: TLRecord["id"][] = [];
         const toPut: TLRecord[] = [];
-        const diff = e.diff;
 
-        if (diff.type === "map") {
+        const afterValue = docStore.getDeepValue();
+        if (e.path.length === 1) {
+          // container
+          const diff = e.diff as MapDiff;
           for (let id of Object.keys(diff.updated)) {
-            const record = diff.updated[id];
-            if (record) {
-              // @ts-ignore
-              toPut.push(record as TLRecord);
+            if (afterValue[id]) {
+              toPut.push(afterValue[id]);
             } else {
-              toRemove.push(id as TLRecord["id"]);
+              // @ts-ignore
+              toRemove.push(id);
             }
+          }
+        } else {
+          const id = e.path[1];
+          // @ts-ignore
+          toRemove.push(id);
+          if (afterValue[id]) {
+            toPut.push(afterValue[id]);
           }
         }
         // put / remove the records in the store
@@ -163,6 +175,7 @@ export default function LoroExample() {
           <Slider
             value={[versionNum]}
             max={maxVersion}
+            min={-1}
             onValueChange={(v) => {
               if (v[0] === maxVersion) {
                 editor.current?.updateInstanceState({
@@ -218,3 +231,87 @@ const NameEditor = track(() => {
     </div>
   );
 });
+
+const addRecord = (loroMap: LoroMap, record: TLRecord) => {
+  const recordMap = loroMap.setContainer(record.id, "Map");
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "props" || key === "meta") {
+      const propsMap = recordMap.setContainer(key, "Map");
+      for (const [k, v] of Object.entries(value)) {
+        if (k === "segments") {
+          const segmentsList = propsMap.setContainer(k, "List");
+          // @ts-ignore
+          for (let i = 0; i < v.length; i++) {
+            // @ts-ignore
+            addSegments(segmentsList.insertContainer(i, "Map"), v[i]);
+          }
+        } else {
+          propsMap.set(k, v);
+        }
+      }
+    } else {
+      recordMap.set(key, value);
+    }
+  }
+};
+
+const addSegments = (segmentsMap: LoroMap, segments: TLDrawShapeSegment) => {
+  segmentsMap.set("type", segments.type);
+  const points = segments.points;
+  const pointsList = segmentsMap.setContainer("points", "List");
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i];
+    pointsList.insert(i, point);
+  }
+};
+
+const updateSegments = (
+  doc: Loro,
+  segmentsMap: LoroMap,
+  segments: TLDrawShapeSegment
+) => {
+  if (segmentsMap.get("type") !== segments.type) {
+    addSegments(segmentsMap, segments);
+  } else {
+    const pointId = segmentsMap.get("points") as Container;
+    const points = doc.getContainerById(pointId.id) as LoroList;
+    for (let i = points.length; i < segments.points.length; i++) {
+      points.insert(i, segments.points[i]);
+    }
+  }
+};
+
+const updateRecord = (doc: Loro, loroStore: LoroMap, record: TLRecord) => {
+  const id = loroStore.get(record.id)! as Container;
+  const recordMap = doc.getContainerById(id.id) as LoroMap;
+  for (const [key, value] of Object.entries(record)) {
+    if (key === "props" || key === "meta") {
+      const src = recordMap.get(key) as Container;
+      const propsMap = doc.getContainerById(src.id) as LoroMap;
+      for (const [k, v] of Object.entries(value)) {
+        if (k === "segments") {
+          const segments = doc.getContainerById(
+            (propsMap.get(k) as Container).id
+          ) as LoroList;
+          // @ts-ignore
+          for (let i = 0; i < v.length; i++) {
+            let mapContainer;
+            if (i > segments.length - 1) {
+              mapContainer = segments.insertContainer(i, "Map");
+            } else {
+              mapContainer = doc.getContainerById(
+                (segments.get(i) as Container).id
+              ) as LoroMap;
+            }
+            // @ts-ignore
+            updateSegments(doc, mapContainer, v[i]);
+          }
+        } else if (propsMap.get(k) !== v) {
+          propsMap.set(k, v);
+        }
+      }
+    } else if (recordMap.get(key) !== value) {
+      recordMap.set(key, value);
+    }
+  }
+};
