@@ -9,7 +9,9 @@ import {
   useEditor,
   Editor,
   TLDrawShapeSegment,
+  StoreListener,
 } from "@tldraw/tldraw";
+import { throttle } from "throttle-debounce";
 import { Slider, Theme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -54,23 +56,24 @@ export default function LoroExample() {
     // const doc = new Loro();
     const docStore = doc.getMap("tl_draw");
     const unsubs: (() => void)[] = [];
+    const listener = function syncStoreChangesToLoroDoc({ changes }) {
+      if (doc.is_detached()) {
+        return;
+      }
+      Object.values(changes.added).forEach((record) => {
+        addRecord(docStore, record);
+      });
+      Object.values(changes.updated).forEach(([_, record]) => {
+        updateRecord(doc, docStore, record);
+      });
+      Object.values(changes.removed).forEach((record) => {
+        docStore.delete(record.id);
+      });
+      doc.commit();
+    } as StoreListener<TLRecord>;
     unsubs.push(
       store.listen(
-        function syncStoreChangesToLoroDoc({ changes }) {
-          if (doc.is_detached()) {
-            return;
-          }
-          Object.values(changes.added).forEach((record) => {
-            addRecord(docStore, record);
-          });
-          Object.values(changes.updated).forEach(([_, record]) => {
-            updateRecord(doc, docStore, record);
-          });
-          Object.values(changes.removed).forEach((record) => {
-            docStore.delete(record.id);
-          });
-          doc.commit();
-        },
+        throttle(100, listener),
         { source: "user", scope: "document" } // only sync user's document changes
       )
     );
@@ -164,8 +167,8 @@ export default function LoroExample() {
           left: "50%",
           transform: "translateX(-50%)",
           height: "32px",
-          width: "500px",
-          bottom: "64px",
+          width: "66%",
+          bottom: "128px",
         }}
       >
         <div style={{ fontSize: "0.8em" }}>
@@ -281,11 +284,17 @@ const updateSegments = (
   }
 };
 
+// assert record id is unique
 const updateRecord = (doc: Loro, loroStore: LoroMap, record: TLRecord) => {
   const id = loroStore.get(record.id)! as Container;
+  if (!id) {
+    addRecord(loroStore, record);
+    return;
+  }
   const recordMap = doc.getContainerById(id.id) as LoroMap;
   for (const [key, value] of Object.entries(record)) {
     if (key === "props" || key === "meta") {
+      // TODO: text use Text Container
       const src = recordMap.get(key) as Container;
       const propsMap = doc.getContainerById(src.id) as LoroMap;
       for (const [k, v] of Object.entries(value)) {
